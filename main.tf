@@ -1,4 +1,7 @@
 locals {
+  container_name = "${var.name_prefix}-jenkins-server"
+  lb_private     = length(var.subnets_private) > 0 ? true : false
+  lb_subnet_ids  = length(var.subnets_private) > 0 ? var.subnets_private : var.subnets_public
   server_healthcheck = {
     command     = ["CMD-SHELL", "curl -f http://localhost:8080 || exit 1"]
     retries     = 3
@@ -22,9 +25,30 @@ locals {
     {
       name  = "CASC_JENKINS_CONFIG",
       value = var.jenkins_config_url
-    }
+    },
+    {
+      name  = "SECRETS",
+      value = "/var/jenkins_home/secrets"
+    },
+    {
+      name  = "JENKINS_PARAMETER_PATH",
+      value = var.secrets_parameter_path
+    },
   ]
 }
+
+data "aws_caller_identity" "current" {}
+
+#------------------------------------------------------------------------------
+# AWS Cloudwatch Logs
+#------------------------------------------------------------------------------
+module aws_cw_logs {
+  source  = "cn-terraform/cloudwatch-logs/aws"
+  version = "1.0.6"
+
+  logs_path = "/ecs/service/${var.name_prefix}-server"
+}
+
 #------------------------------------------------------------------------------
 # AWS ECS Task Execution Role
 #------------------------------------------------------------------------------
@@ -39,6 +63,25 @@ data "aws_iam_policy_document" "ecs_assume_role" {
   }
 }
 
+data "aws_iam_policy_document" "ssm_read" {
+  statement {
+    actions = [
+      "ssm:GetParameter",
+      "ssm:GetParametersByPath"
+    ]
+
+    resources = [
+      "arn:aws:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:parameter${var.secrets_parameter_path}/*"
+    ]
+  }
+}
+
+resource "aws_iam_policy" "ssm_read" {
+  name   = "${var.name_prefix}-ssm-read"
+  path   = "/"
+  policy = data.aws_iam_policy_document.ssm_read.json
+}
+
 resource "aws_iam_role" "ecs_task_execution_role" {
   name               = "${var.name_prefix}-ecs-task-execution-role"
   assume_role_policy = data.aws_iam_policy_document.ecs_assume_role.json
@@ -48,6 +91,11 @@ resource "aws_iam_role_policy_attachment" "ecs_task_execution_role_policy_attach
   role       = aws_iam_role.ecs_task_execution_role.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
+
+resource "aws_iam_role_policy_attachment" "ssm_read" {
+  role       = aws_iam_role.ecs_task_execution_role.name
+  policy_arn = aws_iam_policy.ssm_read.arn
+}
 # End task execution role
 
 module "container_definition" {
@@ -55,8 +103,8 @@ module "container_definition" {
   source  = "cloudposse/ecs-container-definition/aws"
   version = "0.23.0"
 
-  container_name               = "${var.name_prefix}-jenkins-server"
-  container_image              = "jenkins/jenkins:lts"
+  container_name               = local.container_name
+  container_image              = var.container_image
   container_memory             = 4096
   container_memory_reservation = 2048
   port_mappings                = local.server_td_port_mappings
@@ -64,8 +112,15 @@ module "container_definition" {
   container_cpu                = 2048
   essential                    = true
   environment                  = local.server_environment
-  # TODO pass in log config
-  #log_configuration            = var.log_configuration
+  log_configuration = {
+    logDriver = "awslogs"
+    options = {
+      "awslogs-region"        = var.region
+      "awslogs-group"         = module.aws_cw_logs.logs_path
+      "awslogs-stream-prefix" = "ecs"
+    }
+    secretOptions = null
+  }
   # TODO efs
   #mount_points                 = var.mount_points
   # TODO this is also a possibility if git source doesn't work
@@ -76,13 +131,12 @@ module "container_definition" {
 
 # Task Definition
 resource "aws_ecs_task_definition" "server" {
-  family = "jenkins-server"
-  # TODO looks ok, mostly just a wrapper for the map
-  # https://github.com/cloudposse/terraform-aws-ecs-container-definition/blob/master/main.tf#L27
+  family                = "jenkins-server"
   container_definitions = "[ ${module.container_definition.json_map} ]" # TODO
   task_role_arn         = var.task_role_arn == null ? aws_iam_role.ecs_task_execution_role.arn : var.task_role_arn
   execution_role_arn    = aws_iam_role.ecs_task_execution_role.arn
   network_mode          = "awsvpc"
+
   # Origin has this, but I don't think we need the complexity right now
   #  dynamic "placement_constraints" {
   #    for_each = var.placement_constraints
@@ -95,6 +149,7 @@ resource "aws_ecs_task_definition" "server" {
   memory                   = var.container_memory
   requires_compatibilities = ["FARGATE"]
   # Origin has this, but I don't think we need the complexity right now
+  # This is for app mesh
   #  dynamic "proxy_configuration" {
   #    for_each = var.proxy_configuration
   #    content {
@@ -132,4 +187,36 @@ resource "aws_ecs_task_definition" "server" {
       }
     }
   }
+}
+
+resource "aws_security_group" "sg_worker_id" {
+  name   = "${var.name_prefix}-jenkins-worker-id"
+  vpc_id = var.vpc_id
+  tags   = var.tags
+}
+
+resource "aws_ecs_cluster" "cluster" {
+  name = "${var.name_prefix}-jenkins"
+}
+
+module ecs-fargate-service {
+  source  = "cn-terraform/ecs-fargate-service/aws"
+  version = "2.0.4"
+
+  name_preffix                      = "${var.name_prefix}-jenkins"
+  vpc_id                            = var.vpc_id
+  ecs_cluster_arn                   = aws_ecs_cluster.cluster.arn
+  health_check_grace_period_seconds = 120
+  task_definition_arn               = aws_ecs_task_definition.server.arn
+  private_subnets                   = var.subnets_private
+  public_subnets                    = var.subnets_public
+  container_name                    = local.container_name
+  ecs_cluster_name                  = aws_ecs_cluster.cluster.name
+  lb_arn                            = aws_lb.lb.arn
+  lb_http_tgs_arns                  = [aws_lb_target_group.jenkins_http.arn, aws_lb_target_group.jenkins_jnlp.arn]
+  lb_https_tgs_arns                 = []
+  lb_http_listeners_arns            = [aws_lb_listener.http.arn, aws_lb_listener.jnlp.arn]
+  lb_https_listeners_arns           = [aws_lb_listener.https.arn]
+  load_balancer_sg_id               = aws_security_group.loadbalancer_id.id
+  platform_version                  = "1.3.0"
 }
