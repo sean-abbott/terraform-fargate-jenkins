@@ -19,6 +19,7 @@ Some things that must be in place for this module to work correctly.
 * Set up the parameter values automatically with the admin password. Could also stand to set up the URL in a separate thing on the calling side, as it needs to be in place for the CASC to work.
 * More instructions
 * Provide the necessary setup to let jenkins run ECS agents; at the minimum this will be adding the IAM permissions. It's on the caller to use an image with the plugin installed. See [requirements](#requirements)
+* figure out and provide instructions for running container image builds in this setup. Perhaps https://github.com/Dwolla/jenkins-agent-docker-kaniko?
 
 
 ### Notes
