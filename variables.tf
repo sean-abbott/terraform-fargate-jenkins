@@ -76,8 +76,8 @@ variable "region" {
   default     = "us-east-1"
 }
 
-variable "secrets_parameter_path" {
-  description = "The base path for secret parameters. For instance, var.secrets_parameter_path/adminpassword. Do not use a trailing slash."
+variable "ssm_parameters_path" {
+  description = "The base path for parameters. For instance, var.ssm_parameters_path/adminpassword. Do not use a trailing slash."
   type        = string
   default     = "/service/jenkins/secrets"
 }

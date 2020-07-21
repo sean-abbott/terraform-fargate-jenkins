@@ -32,7 +32,7 @@ locals {
     },
     {
       name  = "JENKINS_PARAMETER_PATH",
-      value = var.secrets_parameter_path
+      value = "${var.ssm_parameters_path}/secrets"
     },
   ]
 }
@@ -71,7 +71,7 @@ data "aws_iam_policy_document" "ssm_read" {
     ]
 
     resources = [
-      "arn:aws:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:parameter${var.secrets_parameter_path}/*"
+      "arn:aws:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:parameter${var.ssm_parameters_path}*"
     ]
   }
 }
@@ -80,6 +80,11 @@ resource "aws_iam_policy" "ssm_read" {
   name   = "${var.name_prefix}-ssm-read"
   path   = "/"
   policy = data.aws_iam_policy_document.ssm_read.json
+}
+
+resource "aws_iam_role_policy_attachment" "ssm_read" {
+  role       = aws_iam_role.ecs_task_execution_role.name
+  policy_arn = aws_iam_policy.ssm_read.arn
 }
 
 resource "aws_iam_role" "ecs_task_execution_role" {
@@ -92,10 +97,60 @@ resource "aws_iam_role_policy_attachment" "ecs_task_execution_role_policy_attach
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
-resource "aws_iam_role_policy_attachment" "ssm_read" {
-  role       = aws_iam_role.ecs_task_execution_role.name
-  policy_arn = aws_iam_policy.ssm_read.arn
+data "aws_iam_policy_document" "ecs_control" {
+  statement {
+    actions = [
+      "ecs:RegisterTaskDefinition",
+      "ecs:ListClusters",
+      "ecs:DescribeContainerInstances",
+      "ecs:ListTaskDefinitions",
+      "ecs:DescribeTaskDefinition",
+      "ecs:DeregisterTaskDefinition",
+    ]
+
+    resources = ["*"]
+  }
+
+  statement {
+    actions = [
+      "ecs:ListContainerInstances"
+    ]
+    resources = [
+      aws_ecs_cluster.cluster.arn
+    ]
+  }
+
+  statement {
+    actions = [
+      "ecs:RunTask",
+      "ecs:StopTask",
+      "ecs:DescribeTasks",
+    ]
+    resources = [
+      "arn:aws:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:task-definition/*"
+    ]
+    condition {
+      test     = "ArnEquals"
+      variable = "ecs:Cluster"
+      values = [
+        aws_ecs_cluster.cluster.arn
+      ]
+    }
+  }
 }
+
+resource "aws_iam_policy" "ecs_control" {
+  name   = "${var.name_prefix}-ecs-control"
+  path   = "/"
+  policy = data.aws_iam_policy_document.ecs_control.json
+}
+
+resource "aws_iam_role_policy_attachment" "ecs_control" {
+  role       = aws_iam_role.ecs_task_execution_role.name
+  policy_arn = aws_iam_policy.ecs_control.arn
+}
+
+
 # End task execution role
 
 module "container_definition" {

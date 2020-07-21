@@ -20,6 +20,7 @@ Some things that must be in place for this module to work correctly.
 * More instructions
 * Provide the necessary setup to let jenkins run ECS agents; at the minimum this will be adding the IAM permissions. It's on the caller to use an image with the plugin installed. See [requirements](#requirements)
 * figure out and provide instructions for running container image builds in this setup. Perhaps https://github.com/Dwolla/jenkins-agent-docker-kaniko?
+  * ok it looks like kaniko MIGHT work, but I need to get the docker config.json populated into the container ahead of time and possibly? set it up a little differently for running in fargate as opposed to k8s. it looks like maybe the examples are for running a single build task with the source already pulled, rather than pulling the source? I dunno. Need to ask some questions.
 
 
 ### Notes
